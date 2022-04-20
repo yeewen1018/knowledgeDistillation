@@ -102,8 +102,8 @@ def train_and_evaluate_specialist(trainloader, testloader, teacher_model, specia
                     modified_teacher_outputs[batch_index][class_index] = teacher_output[cluster[class_index]]
                     teacher_output[cluster[class_index]] = 0 
                     
-                # Look for the maximum logit value for non-domain class and assign that value as the logit of the dustbin class 
-                modified_teacher_outputs[batch_index][dustbin_class] = torch.max(teacher_output)
+                # Sum the logits for non-domain classes and assign that value as the logit of the dustbin class 
+                modified_teacher_outputs[batch_index][dustbin_class] = torch.sum(teacher_output) + np.log(50)
                 
             modified_teacher_outputs = torch.tensor(modified_teacher_outputs).float()
             if torch.cuda.is_available(): 
