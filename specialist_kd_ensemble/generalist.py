@@ -1,70 +1,79 @@
-import utils
-import torch 
+import torch
 import torch.optim as optim
-import torch.nn as nn 
+import torch.nn as nn
 
-from sklearn.metrics import confusion_matrix
-import seaborn as sn
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt 
-import itertools
+import utils
+from kmeans_pytorch import kmeans, kmeans_predict 
 
-import scipy
-import scipy.cluster.hierarchy as sch
+def get_generalist_model(opt, trainloader, testloader): 
 
-
-def get_generalist_model_cifar100(model_name, pretrained_model_path, trainloader, testloader): 
-    """ Returns generalist model trained on the CIFAR-100 dataset. """
-
-    generalist_model_name = 'cifar100_' + model_name
+    generalist_model_name = 'cifar100_' + opt.model_type
     generalist_model = torch.hub.load("chenyaofo/pytorch-cifar-models", generalist_model_name, pretrained = True)
 
-    if pretrained_model_path is not None: 
+    if opt.pretrained_generalist_path is not None: 
         print("Using pre-trained generalist model")
+        generalist_state_dict = torch.load(opt.pretrained_generalist_path, map_location = torch.device('cpu'))
+        generalist_model.load_state_dict(generalist_state_dict)
         if torch.cuda.is_available(): 
-            state_dict = torch.load(pretrained_model_path)
-            generalist_model = generalist_model.cuda() 
-        else: 
-            state_dict = torch.load(pretrained_model_path, map_location = torch.device('cpu'))
-        generalist_model.load_state_dict(state_dict)
-        
+            generalist_model = generalist_model.cuda()
     else: 
-        if torch.cuda.is_available(): 
-            generalist_model = generalist_model.cuda() 
-        optimizer = optim.SGD(generalist_model.parameters(), lr = 0.001, momentum = 0.9, nesterov = True, weight_decay = 5e-4)
-        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size = 80, gamma = 0.1)
-        criterion = nn.CrossEntropyLoss()
-        num_epochs = 10 
-        utils.train_and_evaluate_scratch(trainloader, testloader, generalist_model, optimizer, scheduler, criterion, num_epochs, 'specialists/generalist_model_cifar100.pth')
-
+        print("No pretrained path available. Training a new model as the generalist")
+        optimizer = optim.SGD(generalist_model.parameters(), lr = opt.lr, momentum = opt.momentum, nesterov = opt.nesterov, weight_decay = opt.weight_decay)
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size = opt.lr_step_size, gamma = opt.lr_scheduler_gamma)
+        criterion = nn.CrossEntropyLoss() 
+        model_path = opt.pretrained_generalist_path
+        utils.train_and_evaluate_scratch(trainloader, testloader, generalist_model, optimizer, scheduler, criterion, opt.generalist_num_train_epochs, model_path)
+    
     return generalist_model 
 
 
-def get_confusable_classes(model, testloader): 
-    """ Returns the clusters of confusable classes of a model trained on a set of data. """
-    cf_matrix = utils.get_confusion_matrix(model, testloader)
-    cf_matrix = pd.DataFrame(cf_matrix)
+def get_specialist_subsets(opt, generalist_model, testloader):
+    """
+    Apply k-means clustering on covariance matrix of generalist model 
+    to obtain subsets of specialists. 
+    """
+    
+    if opt.predefined_specialist_subsets:  
+        sub_classes = [[12, 13, 17, 23, 33, 37, 47, 49, 52, 56, 58, 59, 60, 68, 69, 71, 76, 81, 85, 89, 90, 96], 
+               [0, 1, 2, 6, 7, 14, 18, 24, 26, 36, 44, 45, 51, 53, 54, 57, 62, 70, 77, 78, 79, 82, 83, 92, 99], 
+               [5, 8, 9, 10, 11, 16, 20, 22, 25, 28, 35, 39, 40, 41, 46, 48, 61, 84, 86, 87, 94, 98], 
+               [3, 4, 15, 19, 21, 29, 31, 34, 38, 42, 43, 50, 55, 63, 64, 65, 66, 74, 75, 80, 88, 97], 
+               [27, 30, 32, 67, 72, 73, 91, 93, 95], 
+                [12, 17, 23, 33, 37, 47, 49, 52, 56, 59, 60, 68, 69, 71, 76, 81, 85, 90, 96],
+               [3, 4, 21, 29, 31, 34, 38, 42, 43, 63, 64, 66, 74, 80, 88, 97],
+               [27, 30, 55, 72, 95],
+               [6, 7, 14, 26, 44, 50, 51, 77, 78, 79, 93],
+               [1, 18, 24, 32, 45, 67, 73, 91, 99],
+               [2, 11, 15, 19, 35, 36, 46, 65, 75, 98]]
+        return sub_classes 
 
-    if torch.cuda.is_available(): 
-        X = cf_matrix.corr().values()
-    else: 
-        X = cf_matrix.corr() 
+    outputs_array = torch.zeros(10000, opt.num_classes)
+    generalist_model.eval() 
+    i = 0 
+    with torch.no_grad(): 
+        for data in testloader: 
+            inputs, labels = data
+            if torch.cuda.is_available(): 
+                inputs, labels = inputs.cuda(), labels.cuda() 
 
-    d = sch.distance.pdist(X)
-    L = sch.linkage(d, method = "complete")
-    ind = sch.fcluster(L, 0.5*d.max(), 'distance')
-    columns = [cf_matrix.columns.tolist()[i] for i in list((np.argsort(ind)))]
-    cf_matrix = cf_matrix.reindex(columns, axis = 1)
+            outputs = generalist_model(inputs)
+            num_examples_per_batch = labels.shape[0]
+            for index in range(num_examples_per_batch): 
+                outputs_array[i] = outputs[index].detach().cpu()
+                i += 1
+    
+    covariance_matrix = torch.cov(outputs_array.T)
 
-    utils.plot_corr(cf_matrix, size = 18)
+    # K-means clustering 
+    cluster_ids_x, cluster_centers = kmeans(X = covariance_matrix, num_clusters = opt.num_specialists, distance = 'euclidan', 
+                                            device = torch.device('cuda:0') if torch.cuda.is_availale() else torch.device('cpu'))
 
-    # There should be a way to automate this process of identifying clusters of confusable classes. 
-    # But for now, we manually identify these clusters from the correlation plot. The generalist model 
-    # used here is resnet20. The clusters of confusable classes for this model are written as below:   
-    clusters = [[35, 46, 11, 98, 2], [55, 72, 3], [47, 52, 96, 59], [74, 50, 4, 63], [15, 19, 43], [64, 97, 36, 65], [65, 80, 34, 38], 
-          [74, 50, 4, 63, 15, 19, 43, 64, 97, 36, 65, 65, 80, 34, 38], [95, 30, 73], [32, 67, 93], [95, 30, 73, 32, 67, 93],
-           [74, 50, 4, 63, 15, 19, 43, 64, 97, 36, 65, 65, 80, 34, 38, 7, 24, 79, 26, 45, 6, 14, 78, 99, 18, 44, 27, 95, 30, 73, 32, 67, 93],
-           [28, 40, 10, 61], [10, 61, 22], [28, 40, 10, 61, 22], [92, 70, 62, 54], [81, 13, 90]]
+    sub_classes = [] 
+    for i in range(opt.num_specialists): 
+        sub_class = [] 
+        for j in range(len(cluster_ids_x)): 
+            if cluster_ids_x[j] == i: 
+                sub_class.append(j)
+        sub_classes.append(sub_class)
+    return sub_classes
 
-    return clusters 
