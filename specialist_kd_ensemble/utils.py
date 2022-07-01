@@ -33,15 +33,15 @@ def train_and_evaluate_scratch(trainloader, testloader, model, optimizer, schedu
             train_total += labels.size(0)
     
         # Evaluation 
-        test_running_loss, test_corrects, test_total = evaluate(model, testloader)
+        test_corrects, test_total, test_running_loss = evaluate(model, testloader)
 
         scheduler.step()
         if test_running_loss/test_total < lowest_test_loss: 
             torch.save(model.state_dict, model_path)
             lowest_test_loss = test_running_loss/test_total
  
-        print('[{}], train_loss: {0:.4f}, test_loss: {0:.4f}, train_accuracy: {0:.2f}, test_accuracy: {0:.2f}'.format(epoch+1, running_loss/train_total, test_running_loss/test_total, 
-        train_corrects/train_total, test_corrects/test_total))
+        print('[{}], train_loss: {}, test_loss: {}, train_accuracy: {} %, test_accuracy: {} %'.format(epoch+1, running_loss/train_total, test_running_loss/test_total, 
+        train_corrects*100/train_total, test_corrects*100/test_total))
 
 
 def evaluate(model, testloader):   
