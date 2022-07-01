@@ -17,7 +17,7 @@ if __name__ == '__main__':
 
     # Test generalist model 
     test_corrects, test_total, test_running_loss = utils.evaluate(generalist_model, testloader)
-    print('Testing accuracy of generalist model: {0:.2f}%'.format(test_corrects*100/test_total))
+    print('Testing accuracy of generalist model: {} %'.format(test_corrects*100/test_total))
 
     # Get subsets of classes based on covariance matrix of generalist model 
     sub_classes = generalist.get_specialist_subsets(opt, generalist_model, testloader)
@@ -27,4 +27,4 @@ if __name__ == '__main__':
 
     # Run iterative algorithm 
     corrects, total, index_corrects = ensemble.run_iterative_optimisation(generalist_model, specialist_models, sub_classes, testloader)
-    print("The testing accuracy of the ensemble is {0:.2f}%".format(corrects*100/total))
+    print("The testing accuracy of the ensemble is {} %".format(corrects*100/total))
