@@ -1,16 +1,58 @@
-from venv import create
-from sklearn.utils import shuffle
-import torch 
-import torch.nn as nn 
-import torchvision.transforms as transforms 
-import torch.optim as optim 
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torchvision.transforms as transforms
+
 import random 
 import numpy as np 
-import utils 
+
+ 
+def create_specialist_dataset(dataset, subset_class, batch_size, train, dataloader, shuffle = True): 
+    """ Returns dataset enriched with examples that the specialist model specializes in. """
+    
+    # Gather all images that belong to specialist's sub-class 
+    num_examples = len(dataset.targets)
+    
+    subset_indices = [] 
+    for label in subset_class: 
+        indices = [i for i in range(num_examples) if dataset.targets[i] == label]
+        subset_indices.append(indices)
+        
+    # Flatten the list of lists into one list 
+    subset_indices = [item for sublist in subset_indices for item in sublist]
+    
+    # Get training data from dustbin class
+    if train: 
+        num_dustbin_examples = 500
+    else: 
+        num_dustbin_examples = 100 
+        
+    random_indices = np.random.randint(0, num_examples - 1, num_dustbin_examples * 5)
+    dustbin_indices = [] 
+    for index in random_indices: 
+        if index in subset_indices: 
+            continue
+        else: 
+            dustbin_indices.append(index)          
+    random.shuffle(dustbin_indices)
+    dustbin_indices = dustbin_indices[:num_dustbin_examples]
+    
+    # Combine examples from specialised subset and dustbin class 
+    indices = subset_indices + dustbin_indices 
+    
+    # Create dataset 
+    specialist_dataset, specialist_dataset_targets = [dataset.data[i] for i in indices], [dataset.targets[i] for i in indices]
+    transformation = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))])
+    torch_specialist_dataset = specialistDataset(specialist_dataset, specialist_dataset_targets, transform = transformation)
+    if not dataloader: 
+        return torch_specialist_dataset
+    
+    specialist_dataloader = torch.utils.data.DataLoader(torch_specialist_dataset, batch_size = batch_size, shuffle = shuffle)
+    return specialist_dataloader
+
 
 
 class specialistDataset(torch.utils.data.Dataset):
-    """ Customised dataset for a specialist. """
     def __init__(self, images, labels, transform=None):
         super(specialistDataset, self).__init__()
         self.images = images
@@ -26,58 +68,25 @@ class specialistDataset(torch.utils.data.Dataset):
             sample = self.transform(sample)
         label = self.labels[idx]
         return sample, label 
+
+
+def train_and_evaluate_specialist(trainloader, testloader, specialist_model, optimizer, scheduler, criterion, num_epochs, sub_class, model_path): 
     
-
-def create_specialist_dataloader(dataset, cluster, transformation, batch_size, shuffle_boolean):
-    """ Returns customised dataloader to train a specialist. 
-    The dataset contains 50% examples from the specialist's domain classes and 50% from non-domain classes. """ 
-
-    # Get the index of data that belongs to the specialist's domain 
-    indices = []
-    for class_label in cluster: 
-        index = [i for i in range(len(dataset.targets)) if dataset.targets[i] == class_label]
-        indices.append(index)
-
-    # Flatten the list of indices into one list 
-    indices = [i for class_indices in indices for i in class_indices]
-
-    # Get another 50% of data from non-domain class
-    num_examples = len(indices)
-    dustbin_indices = [random.randint(0, len(dataset.targets) - 1) for i in range(0, num_examples * 2) if i not in indices]
-    dustbin_indices = dustbin_indices[:num_examples]
-
-    # Combine domain and non-domain (dustbin) indices 
-    specialist_indices = indices + dustbin_indices
-
-    # Create dataset 
-    specialist_dataset, specialist_dataset_targets = [dataset.data[i] for i in specialist_indices], [dataset.targets[i] for i in specialist_indices]
-    s_dataset = specialistDataset(specialist_dataset, specialist_dataset_targets, transform= transformation)
-    specialist_dataloader = torch.utils.data.DataLoader(s_dataset, batch_size = batch_size, shuffle = shuffle_boolean)
-    return specialist_dataloader
-
-
-
-def train_and_evaluate_specialist(trainloader, testloader, teacher_model, specialist_model, optimizer, scheduler, alpha, temperature, num_epochs, cluster, model_path): 
-    """ Trains a specialist model. Returns the best testing accuracy achieved by the model. """
-    
-    best_test_acc = 0.0
-    dustbin_class = len(cluster)
-    
-    teacher_model.eval()
-    specialist_model.train()
+    lowest_test_loss = 10.0
+    dustbin_class = len(sub_class)
     
     for epoch in range(num_epochs): 
-        running_loss, corrects = 0.0, 0 
-        train_total = 0 
-        
+        running_loss, corrects, train_total = 0.0, 0, 0 
+        specialist_model.train()
+
         for i, data in enumerate(trainloader, 0): 
             inputs, labels = data 
             
             # Correct the labels
             for index in range(labels.shape[0]): 
                 label = labels[index]
-                if label in cluster: 
-                    labels[index] = cluster.index(label)
+                if label in sub_class: 
+                    labels[index] = sub_class.index(label)
                 else: 
                     labels[index] = dustbin_class
                 
@@ -86,144 +95,98 @@ def train_and_evaluate_specialist(trainloader, testloader, teacher_model, specia
                 
             # Zero the parameter gradients 
             optimizer.zero_grad()
-            
-            # Forward 
             outputs = specialist_model(inputs)
-            teacher_outputs = teacher_model(inputs).detach()
-            
-            # Correct the teacher outputs 
-            num_batches, num_specialist_classes = outputs.shape[0], len(cluster)
-            modified_teacher_outputs = np.zeros((num_batches, num_specialist_classes+1))
-            
-            for batch_index in range(num_batches): 
-                teacher_output = teacher_outputs[batch_index]
-                
-                for class_index in range(num_specialist_classes): 
-                    modified_teacher_outputs[batch_index][class_index] = teacher_output[cluster[class_index]]
-                    teacher_output[cluster[class_index]] = 0 
-                    
-                # Sum the logits for non-domain classes and assign that value as the logit of the dustbin class 
-                modified_teacher_outputs[batch_index][dustbin_class] = torch.sum(teacher_output) + np.log(50)
-                
-            modified_teacher_outputs = torch.tensor(modified_teacher_outputs).float()
-            if torch.cuda.is_available(): 
-                modified_teacher_outputs = modified_teacher_outputs.cuda()
-            
-            # Backward + Optimize
-            loss = utils.distillation_loss(outputs, modified_teacher_outputs, labels, temperature, alpha) 
+            loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
             
             # Calculate statistics
             running_loss += loss.item()
-            
-          # We need to modify the outputs when calculating the accuracy 
             predicted_class = outputs.data.max(1, keepdim = True)[1]
             corrects += predicted_class.eq(labels.data.view_as(predicted_class)).cpu().sum()
             train_total += labels.size(0)
             
         # Evaluation 
-        test_correct, test_total = 0, 0 
-        with torch.no_grad(): 
-            for data in testloader: 
-                images, labels = data 
-                
-                for j in range(labels.shape[0]): 
-                    label = labels[j]
-                    if label in cluster: 
-                        labels[j] = cluster.index(label)
-                    else: 
-                        labels[j] = dustbin_class              
-                
-                if torch.cuda.is_available(): 
-                    images, labels = images.cuda(), labels.cuda()
-
-                # Calculate the outputs by running images through the network 
-                outputs = specialist_model(images)
-    
-                _, predicted = torch.max(outputs.data, 1)
-                test_total += labels.size(0)
-                test_correct += (predicted == labels).cpu().sum().item()
+        test_correct, test_total, test_running_loss = evaluate_specialist(specialist_model, testloader, sub_class)
         
         scheduler.step()
-        
-        if test_correct/test_total > best_test_acc: 
+        if test_running_loss/test_total < lowest_test_loss: 
             torch.save(specialist_model.state_dict(), model_path)
-            best_test_acc = test_correct/test_total
+            lowest_test_loss = test_running_loss/test_total
+        
+        #print('[{}], train_loss: {0:.4f}, test_loss: {0:.4f}, train_accuracy: {0:.2f}, test_accuracy: {0:.2f}'.format(epoch+1, running_loss/train_total, test_running_loss/test_total, 
+        #            corrects/train_total, test_correct/test_total))
 
-        #print(f'[{epoch + 1}] train_loss: {running_loss/train_total}, train_acc: {corrects/train_total}, test_acc: {test_correct/test_total}') 
-    return best_test_acc
 
-
-
-def train_best_specialist(specialist_model_name, generalist_model, generalist_state_dict, cluster, index, trainset, testset): 
-    """ Returns the specialist model trained with the most optimal temperature and alpha values. """
-    
-    alpha_values = [0.90, 0.95, 0.98]
-    temperature_values = [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-
-    transformation = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))])
-    specialist_trainloader = create_specialist_dataloader(dataset = trainset, cluster = cluster, batch_size = 128, transformation= transformation, shuffle_boolean= True)
-    specialist_testloader = create_specialist_dataloader(dataset= testset, cluster = cluster, transformation= transformation, batch_size= 1024, shuffle_boolean= False)
-
-    best_model_test_acc = 0.0
-    for alpha in alpha_values: 
-        for temp in temperature_values: 
-            specialist_model = torch.hub.load("chenyaofo/pytorch-cifar-models", specialist_model_name, pretrained = False)
-            specialist_model.load_state_dict(generalist_state_dict)
-            specialist_model.fc = nn.Linear(specialist_model.fc.in_features, len(cluster) + 1) # + 1 for dustbin class
+def evaluate_specialist(specialist_model, testloader, sub_class): 
+    test_correct, test_total, test_running_loss = 0, 0, 0.0 
+    dustbin_class = len(sub_class)
+    criterion = nn.CrossEntropyLoss() 
+    specialist_model.eval() 
+    with torch.no_grad(): 
+        for data in testloader: 
+            images, labels = data            
+            for j in range(labels.shape[0]): 
+                label = labels[j]
+                if label in sub_class: 
+                    labels[j] = sub_class.index(label)
+                else: 
+                    labels[j] = dustbin_class              
+                
             if torch.cuda.is_available(): 
-                specialist_model = specialist_model.cuda()  
-            optimizer = optim.SGD(specialist_model.parameters(), lr = 0.01, momentum = 0.9, weight_decay = 1e-4)
-            scheduler = optim.lr_scheduler.StepLR(optimizer, step_size = 20, gamma = 0.1)
-            num_epochs = 20
-            model_path = 'specialists/specialist_kd_model_' + str(index) + '_cifar100.pth'
-            best_test_acc = train_and_evaluate_specialist(specialist_trainloader, specialist_testloader, generalist_model, specialist_model, optimizer, scheduler, alpha, temp, num_epochs, cluster, model_path)
+                images, labels = images.cuda(), labels.cuda()
 
-            if best_test_acc > best_model_test_acc: 
-                best_model_test_acc = best_test_acc
-                best_model_state_dict = torch.load(model_path)
+            outputs = specialist_model(images)
+            test_loss = criterion(outputs, labels)
+            test_running_loss += test_loss.item()
+            _, predicted = torch.max(outputs.data, 1)
+            test_total += labels.size(0)
+            test_correct += (predicted == labels).cpu().sum().item() 
+    
+    return test_correct, test_total, test_running_loss 
 
-    specialist_model.load_state_dict(best_model_state_dict)
-    torch.save(best_model_state_dict, model_path)
-    return specialist_model 
-              
 
-def train_and_get_specialist_models(generalist_model, generalist_model_name, generalist_model_path, clusters, trainset, testset): 
-    """ Train specialist models from scratch and returns a list of trained specialist models. """
-
+def get_specialist_models(opt, trainset, testset, sub_classes): 
     specialist_models = [] 
-    num_specialists = len(clusters)
+    model_name = "cifar100_" + opt.model_type
+    if not opt.predefined_specialist_subsets:     
+        print("Training specialist models. ")
+        print("==============================================================================")
+        generalist_state_dict = torch.load(opt.pretrained_generalist_path, map_location = torch.device('cpu'))
+        for i in range(opt.num_specialists): 
+            sub_class = sub_classes[i]
+            specialist_model = torch.hub.load("chenyaofo/pytorch-cifar-models", model_name, pretrained = False)
+            specialist_model.load_state_dict(generalist_state_dict)
+            specialist_model.fc = nn.Linear(specialist_model.fc.in_features, len(sub_class) + 1)
+            if torch.cuda.is_available(): 
+                specialist_model = specialist_model.cuda() 
+            
+            criterion = nn.CrossEntropyLoss() 
+            optimizer = optim.SGD(specialist_model.parameters(), lr = opt.lr, nesterov = opt.nesterov, momentum = opt.momentum, weight_decay = opt.weight_decay)
+            scheduler = optim.lr_scheduler.StepLR(optimizer, step_size = opt.lr_step_size, gamma = opt.lr_scheduler_gamma)
+            num_epochs = 20 
+            model_path = 'models/specialist_' + str(i+1) + '.pth'
 
-    # The specialist models are expected to have the same architecture as the generalist model 
-    if torch.cuda.is_available(): 
-        generalist_state_dict = torch.load(generalist_model_path)
+            specialist_train_batch_size = 32
+            specialist_traindataloader = create_specialist_dataset(trainset, sub_class, specialist_train_batch_size, train = True, dataloader = True, shuffle = True)
+            specialist_testdataloader = create_specialist_dataset(testset, sub_class, opt.test_batch_size, train = False, dataloader = True, shuffle = False)
+
+            train_and_evaluate_specialist(specialist_traindataloader, specialist_testdataloader, specialist_model, optimizer, scheduler, criterion, num_epochs, sub_class, model_path)
+            print("Testing accuracy of specialist model {} is {} %".format(i+1, evaluate_specialist(specialist_model, specialist_testdataloader, sub_class)))
+            print("==============================================================================================================")
+            specialist_models.append(specialist_model)
+    
     else: 
-        generalist_state_dict = torch.load(generalist_model_path, map_location= torch.device('cpu'))
-
-    for i in range(num_specialists): 
-        specialist_model_name = 'cifar100_' + generalist_model_name 
-        model = train_best_specialist(specialist_model_name, generalist_model, generalist_state_dict, clusters[i], i+1, trainset, testset)
-        specialist_models.append(model)
+        print("Using pre-trained specialist models")
+        for i in range(opt.num_specialists): 
+            sub_class = sub_classes[i]
+            specialist_model = torch.hub.load("chenyaofo/pytorch-cifar-models", model_name, pretrained = False)
+            specialist_model.fc = nn.Linear(specialist_model.fc.in_features, len(sub_class) + 1)
+            model_path = 'models/specialist_' + str(i+1) + '.pth'
+            specialist_model.load_state_dict(torch.load(model_path, map_location = torch.device('cpu')))
+            if torch.cuda.is_available(): 
+                specialist_model = specialist_model.cuda() 
+            specialist_models.append(specialist_model)
+    
     return specialist_models
 
-
-
-def get_specialist_models(generalist_model_name, pretrained_specialist_models_dict, clusters):
-    """ Returns a list of trained specialist models. """
-
-    specialist_models = [] 
-    num_specialists = len(clusters)
-
-    # The specialist models are expected to have the same architecture as the generalist model 
-    for i in range(num_specialists): 
-        specialist_model_name = "cifar100_" + generalist_model_name
-        model = torch.hub.load("chenyaofo/pytorch-cifar-models", specialist_model_name, pretrained = False)
-        model.fc = nn.Linear(model.fc.in_features, len(clusters[i]) + 1 )  # +1 for dustbin class 
-        if torch.cuda.is_available(): 
-            model.load_state_dict(torch.load('specialists/' + pretrained_specialist_models_dict[i]))
-            model = model.cuda() 
-        else: 
-            model.load_state_dict(torch.load('specialists/' + pretrained_specialist_models_dict[i], map_location= torch.device('cpu')))
-        specialist_models.append(model)
-    return specialist_models 
