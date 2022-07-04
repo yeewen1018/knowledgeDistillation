@@ -3,23 +3,21 @@ import torchvision
 import torchvision.transforms as transforms
 import torch.nn as nn 
 
-def get_cifar100_dataset(): 
-    transformation = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761))])
+def get_cifar100_dataset(cifar100_mean, cifar100_std): 
+    transformation = transforms.Compose([transforms.ToTensor(), transforms.Normalize(cifar100_mean, cifar100_std)])
     
     trainset = torchvision.datasets.CIFAR100(root = './data', train = True, download = True, transform = transformation)
     testset = torchvision.datasets.CIFAR100(root = './data', train = False, download = True, transform = transformation)
     return trainset, testset
 
 
-def train_and_evaluate_scratch(trainloader, testloader, model, optimizer, scheduler, criterion, num_epochs, model_path): 
+def train_and_evaluate_scratch(trainloader, testloader, model, optimizer, scheduler, criterion, num_epochs, model_path, device): 
     lowest_test_loss = 1000.0 
     for epoch in range(num_epochs): 
         running_loss, train_corrects, train_total = 0.0, 0, 0
         model.train() 
-        for i, data in enumerate(trainloader, 0): 
-            inputs, labels = data 
-            if torch.cuda.is_available(): 
-                inputs, labels = inputs.cuda(), labels.cuda()
+        for inputs, labels in trainloader: 
+            inputs, labels = inputs.to(device), labels.to(device)
             
             optimizer.zero_grad() 
             outputs = model(inputs)
@@ -33,26 +31,23 @@ def train_and_evaluate_scratch(trainloader, testloader, model, optimizer, schedu
             train_total += labels.size(0)
     
         # Evaluation 
-        test_corrects, test_total, test_running_loss = evaluate(model, testloader)
+        test_corrects, test_total, test_running_loss = evaluate(model, testloader, device)
 
         scheduler.step()
         if test_running_loss/test_total < lowest_test_loss: 
-            torch.save(model.state_dict, model_path)
+            torch.save(model.state_dict(), model_path)
             lowest_test_loss = test_running_loss/test_total
  
-        print('[{}], train_loss: {}, test_loss: {}, train_accuracy: {} %, test_accuracy: {} %'.format(epoch+1, running_loss/train_total, test_running_loss/test_total, 
-        train_corrects*100/train_total, test_corrects*100/test_total))
+        print(f'[{epoch + 1}], train_loss: {running_loss/train_total:.4f}, test_loss: {test_running_loss/test_total:.4f}, train_accuracy: {train_corrects*100/train_total:.2f} %, test_accuracy: {test_corrects*100/test_total:.2f} %')
 
 
-def evaluate(model, testloader):   
+def evaluate(model, testloader, device):   
     criterion = nn.CrossEntropyLoss() 
     test_running_loss, test_corrects, test_total = 0.0, 0, 0 
     model.eval() 
     with torch.no_grad(): 
-        for data in testloader:
-            inputs, labels = data
-            if torch.cuda.is_available(): 
-                inputs, labels = inputs.cuda(), labels.cuda()
+        for inputs, labels in testloader:
+            inputs, labels = inputs.to(device), labels.to(device) 
 
             outputs = model(inputs)
             loss = criterion(outputs, labels)
@@ -62,8 +57,3 @@ def evaluate(model, testloader):
             test_total += labels.size(0)
 
     return test_corrects, test_total, test_running_loss
-
-
-
-
-
