@@ -4,6 +4,8 @@ def parse_args():
     parser = argparse.ArgumentParser() 
     parser.add_argument('--train_batch_size', default = 128, type = int, help = 'Batch size for training')
     parser.add_argument('--test_batch_size', default = 1, type = int, help = 'Batch size for inference')
+    parser.add_argument('--cifar100_mean', default = (0.5071, 0.4867, 0.4408), type= tuple, help = "Mean for CIFAR-100 dataset")
+    parser.add_argument('--cifar100_std', default = (0.2675, 0.2565, 0.2761), type = tuple, help = "Standard deviation for CIFAR-100 dataset")
     parser.add_argument('--model_type', default = 'resnet20', type = str, help = 'Model architecture')
     parser.add_argument('--pretrained_generalist_path', default='models/teacher_model_cifar100.pth', type = str, help = 'Path to pretrained generalist model')
     parser.add_argument('--lr', default = 0.001, type =float, help = 'Learning rate')
@@ -19,5 +21,3 @@ def parse_args():
 
     args = parser.parse_args() 
     return args 
-
-    
