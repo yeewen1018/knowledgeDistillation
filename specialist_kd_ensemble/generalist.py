@@ -12,18 +12,18 @@ def get_generalist_model(opt, trainloader, testloader):
 
     if opt.pretrained_generalist_path is not None: 
         print("Using pre-trained generalist model")
-        generalist_state_dict = torch.load(opt.pretrained_generalist_path, map_location = torch.device('cpu'))
+        generalist_state_dict = torch.load(opt.pretrained_generalist_path, map_location = opt.device)
         generalist_model.load_state_dict(generalist_state_dict)
-        if torch.cuda.is_available(): 
-            generalist_model = generalist_model.cuda()
+        generalist_model.to(opt.device)
+        
     else: 
         print("No pretrained path available. Training a new model as the generalist")
         optimizer = optim.SGD(generalist_model.parameters(), lr = opt.lr, momentum = opt.momentum, nesterov = opt.nesterov, weight_decay = opt.weight_decay)
         scheduler = optim.lr_scheduler.StepLR(optimizer, step_size = opt.lr_step_size, gamma = opt.lr_scheduler_gamma)
         criterion = nn.CrossEntropyLoss() 
         model_path = opt.pretrained_generalist_path
-        utils.train_and_evaluate_scratch(trainloader, testloader, generalist_model, optimizer, scheduler, criterion, opt.generalist_num_train_epochs, model_path)
-    
+        utils.train_and_evaluate_scratch(trainloader, testloader, generalist_model, optimizer, scheduler, criterion, opt.generalist_num_train_epochs, model_path, opt.device)
+
     return generalist_model 
 
 
@@ -47,27 +47,23 @@ def get_specialist_subsets(opt, generalist_model, testloader):
                [2, 11, 15, 19, 35, 36, 46, 65, 75, 98]]
         return sub_classes 
 
+    # Construct covariance matrix
     outputs_array = torch.zeros(10000, opt.num_classes)
     generalist_model.eval() 
     i = 0 
     with torch.no_grad(): 
-        for data in testloader: 
-            inputs, labels = data
-            if torch.cuda.is_available(): 
-                inputs, labels = inputs.cuda(), labels.cuda() 
+        for inputs, labels in testloader: 
+            inputs, labels = inputs.to(opt.device), labels.to(opt.device)
 
             outputs = generalist_model(inputs)
             num_examples_per_batch = labels.shape[0]
-            for index in range(num_examples_per_batch): 
+            for index in range(num_examples_per_batch):
                 outputs_array[i] = outputs[index].detach().cpu()
-                i += 1
-    
+                i += 1 
     covariance_matrix = torch.cov(outputs_array.T)
 
     # K-means clustering 
-    cluster_ids_x, cluster_centers = kmeans(X = covariance_matrix, num_clusters = opt.num_specialists, distance = 'euclidan', 
-                                            device = torch.device('cuda:0') if torch.cuda.is_availale() else torch.device('cpu'))
-
+    cluster_ids_x, cluster_centers = kmeans(X = covariance_matrix, num_clusters = opt.num_specialists, distance = 'euclidean', device = opt.device)
     sub_classes = [] 
     for i in range(opt.num_specialists): 
         sub_class = [] 
@@ -76,4 +72,3 @@ def get_specialist_subsets(opt, generalist_model, testloader):
                 sub_class.append(j)
         sub_classes.append(sub_class)
     return sub_classes
-
